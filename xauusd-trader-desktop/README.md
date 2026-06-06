@@ -14,89 +14,66 @@
 
 ---
 
-## Prerequisites
+## For Friends — Just Double-Click
+
+No Python. No command line. No editing files.
+
+1. Get the single executable file from the developer:
+   - **Windows:** `XAUUSDTrader.exe`
+   - **Linux:** `XAUUSDTrader`
+2. Double-click it.
+3. The **Setup Wizard** appears. Fill in your MT5 details and Telegram bot token.
+4. Click **Save** — the dashboard opens.
+5. Click **Connect** → **Start Bot** — you're live.
+
+📖 See [`SETUP.md`](SETUP.md) for a detailed step-by-step guide with screenshots and troubleshooting.
+
+---
+
+## For Developers — Build from Source
+
+### Prerequisites
 
 | Requirement | Details |
 |---|---|
 | Python | 3.10 or later |
-| MetaTrader 5 | Must be installed and the terminal path known (e.g. `C:\Program Files\MetaTrader 5\terminal64.exe`) |
-| Telegram bot | A bot token obtained via [@BotFather](https://t.me/BotFather). Forward trading signals to the bot. |
+| MetaTrader 5 | Must be installed and the terminal path known |
+| Telegram bot | A bot token obtained via [@BotFather](https://t.me/BotFather) |
 
----
-
-## Installation
-
-### 1 — Clone or copy the project
-
-```bash
-cd xauusd-trader-desktop
-```
-
-### 2 — Create a virtual environment (recommended)
-
-```bash
-python3 -m venv venv
-source venv/bin/activate      # Linux / macOS
-# venv\Scripts\activate       # Windows
-```
-
-### 3 — Install dependencies
+### Install & Run
 
 ```bash
 pip install -r requirements.txt
-```
-
-> `python-telegram-bot>=20.0` — Telegram bot framework  
-> `MetaTrader5` — Python bridge to MetaTrader 5 terminal  
-> `pyinstaller` — Bundles the app into a standalone `.exe`
-
-### 4 — Verify MT5 path
-
-The first time the app launches it will ask for the full path to your MT5
-`terminal64.exe` (or `terminal.exe` on 32-bit). Keep this path handy.
-
----
-
-## First-Run Setup Wizard
-
-On the very first launch (`python trader_app.py`) a modal **Setup Wizard**
-appears. Fill in every field:
-
-| Field | Description |
-|---|---|
-| MT5 Terminal Path | Full path to `terminal64.exe` |
-| MT5 Account | Trading account number |
-| MT5 Password | Account password |
-| MT5 Server | Broker server (e.g. `Exness-MT5Real`) |
-| Symbol | Trading symbol, default `XAUUSD` |
-| Base Lot | Starting lot size, default `0.01` |
-| Martingale Multiplier | Lot multiplier after a loss, default `2.0` |
-| Max Martingale Levels | Maximum consecutive doublings, default `3` |
-| Position A Ratio % | Size of the first position, default `60` |
-| Telegram Bot Token | Token from `@BotFather` |
-| Magic Number | Unique ID for EA-synced orders, default `20250605` |
-
-Click **Save** to write `config.json` and close the wizard. The app will then
-show the main dashboard. Click **Cancel** to exit without saving.
-
----
-
-## Running the App
-
-```bash
 python trader_app.py
 ```
 
+### Build the Standalone Executable
+
+```bash
+python build_exe.py
+```
+
+PyInstaller produces a self-contained binary — no Python needed on the target machine.
+
+| Platform | Output |
+|---|---|
+| Windows | `dist/XAUUSDTrader.exe` |
+| Linux / macOS | `dist/XAUUSDTrader` |
+
+---
+
+## App Overview
+
 ### Dashboard Tab
 
-- **MT5 Connect / Disconnect** — connect to the MT5 terminal.
-- **Bot Start / Stop** — start listening for Telegram signals.
-- **Martingale Level & Lot** — current position size and level.
-- **Latest Signal** — last received action, symbol, entry, SL, TP1, TP2.
+- **MT5 Connect / Disconnect** — link to your MT5 terminal
+- **Bot Start / Stop** — listen for Telegram signals
+- **Martingale Level & Lot** — current position size and level
+- **Latest Signal** — last received action, symbol, entry, SL, TP1, TP2
 
 ### Manual Entry Tab
 
-Use this tab to send a trade without a Telegram signal:
+Place a trade without waiting for a Telegram signal:
 
 1. Select **BUY** or **SELL**.
 2. Enter symbol, entry price, SL, TP1, TP2, and lot.
@@ -104,43 +81,7 @@ Use this tab to send a trade without a Telegram signal:
 
 ### Log Tab
 
-A read-only scrollable log shows all trading events, errors, and Telegram
-messages in real time.
-
----
-
-## Building the Standalone `.exe`
-
-```bash
-python build_exe.py
-```
-
-PyInstaller will produce `dist/XAUUSDTrader.exe` (Windows) or
-`dist/XAUUSDTrader` (Linux/macOS). The binary is self-contained and can be
-run without a Python installation.
-
-### Output location
-
-```
-xauusd-trader-desktop/
-  dist/
-    XAUUSDTrader.exe    # Windows
-    XAUUSDTrader        # Linux / macOS
-```
-
----
-
-## Distributing to Friends
-
-1. **Share the `.exe` from the `dist/` folder.**
-2. Tell them the MT5 path, account credentials, and Telegram bot token.
-3. On first run they will see the Setup Wizard — no config file needs to be
-   pre-shared.
-4. The `config.json` is stored next to the `.exe` so each user can have their
-   own settings.
-
-> **Tip:** You can rename the `.exe` freely — the app discovers `config.json`
-> relative to its own location.
+Real-time scrollable log of all trading events, errors, and Telegram messages.
 
 ---
 
@@ -156,7 +97,35 @@ xauusd-trader-desktop/
   build_exe.py         # PyInstaller build script
   requirements.txt     # Python dependencies
   README.md            # This file
+  SETUP.md             # User-friendly setup guide
   tests/               # Unit tests for all modules
+```
+
+---
+
+## Signal Formats
+
+The bot understands three message formats. Just forward signals to your bot:
+
+**Multi-line:**
+```
+BUY XAUUSD @ 2350.00
+SL: 2345.00
+TP1: 2355.00
+TP2: 2360.00
+```
+
+**Compact:**
+```
+BUY XAUUSD 2350.00 | SL 2345.00 | TP1 2355.00 | TP2 2360.00
+```
+
+**Simple:**
+```
+BUY XAUUSD @ 2350.00
+SL: 2345.00
+TP1: 2355.00
+TP2: 2360.00
 ```
 
 ---
@@ -165,11 +134,9 @@ xauusd-trader-desktop/
 
 | Symptom | Fix |
 |---|---|
-| `ModuleNotFoundError: No module named 'MetaTrader5'` | Run `pip install -r requirements.txt` |
 | MT5 connection fails immediately | Verify the `terminal64.exe` path is correct |
 | Telegram bot never receives messages | Check the bot token and ensure the bot is added to the channel/group |
 | Orders not placed | Ensure MT5 is logged in and auto-trading is enabled |
-| `pyinstaller: command not found` | Install PyInstaller: `pip install pyinstaller` |
 
 ---
 

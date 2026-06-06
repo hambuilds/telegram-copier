@@ -8,6 +8,8 @@ Reference: telegram-mt5-bot/main.py (original Telethon handler)
 
 from __future__ import annotations
 
+import logging
+
 import queue
 import threading
 from typing import TYPE_CHECKING, Any
@@ -16,7 +18,8 @@ if TYPE_CHECKING:
     from telegram import Update
     from telegram.ext import Application, ContextTypes, MessageHandler
 
-from signal_parser import Signal, parse_signal
+from format_manager import parse_signal
+from signal_parser import Signal
 
 # Lazy telegram import so tests can run without the package installed
 _telegram: object = None  # type: ignore[assignment]
@@ -57,6 +60,9 @@ def _lazy_telegram():
         if not hasattr(filters, "TEXT"):
             filters = _telegram.filters
     return _telegram
+
+
+log = logging.getLogger(__name__)
 
 
 class SignalBot:
@@ -161,6 +167,13 @@ class SignalBot:
         signal = parse_signal(text, self._aliases)
         if signal is not None:
             self._queue.put(signal)
+        else:
+            log.info(
+                "Signal received but no format matched. "
+                "Go to Signal Formats tab to add this channel's format. "
+                "Message: %s",
+                text[:80],
+            )
 
     def _run_polling(self) -> None:
         """

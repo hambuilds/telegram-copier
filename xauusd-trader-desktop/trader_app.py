@@ -4,393 +4,410 @@ Chunk 5 — Desktop GUI
 
 Spec: .kimchi/docs/plan.md
 
-A single-file tkinter application with:
-  - SetupWizard (modal) on first run (no config.json)
-  - Dashboard, Manual Entry, Log tabs via ttk.Notebook
-  - MT5Engine + SignalBot integration via a threading.Queue
-  - Graceful shutdown on WM_DELETE_WINDOW
+Tkinter GUI application for XAUUSD trading with MT5 integration,
+Telegram signal bot, and manual order entry.
 """
 
-from __future__ import annotations
-
-import functools
 import logging
+import os
 import queue
-import threading
+import sys
+
 import tkinter as tk
-from tkinter import scrolledtext, ttk
-from typing import TYPE_CHECKING, Any
+from tkinter import ttk
+from tkinter import scrolledtext
+from tkinter import messagebox
 
 from config_store import TraderConfig
+from format_manager import get_manager
+from format_editor import _SignalFormatsTab
 from mt5_engine import MT5Engine
 from signal_parser import Signal
-
 from telegram_bot import SignalBot
 
-# ── Logging handler that schedules widget updates on the main thread ─────────
+# Module-level logger
+_log = logging.getLogger(__name__)
 
 
-class _QueueLoggingHandler(logging.Handler):
-    """
-    Custom logging handler that stores LogRecords in a tkinter widget.
-
-    Because ``handle()`` is called from arbitrary threads (MT5, Telegram),
-    it uses ``widget.after(0, ...)`` to safely schedule the text insertion
-    on the main GUI thread.
-    """
-
-    def __init__(self, widget: scrolledtext.ScrolledText) -> None:
-        super().__init__()
-        self._widget = widget
-        self.setFormatter(logging.Formatter("%(message)s"))
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            msg = self.format(record)
-            # Schedule GUI update on the main thread (must wrap in lambda/partial — after() doesn't accept extra args)
-            self._widget.after(0, functools.partial(self._append, msg))
-        except Exception:
-            self.handleError(record)
-
-    def _append(self, msg: str) -> None:
-        self._widget.configure(state="normal")
-        self._widget.insert(tk.END, msg + "\n")
-        self._widget.see(tk.END)
-        self._widget.configure(state="disabled")
-
-
-# ── Setup Wizard ─────────────────────────────────────────────────────────────
+# ── Setup Wizard ──────────────────────────────────────────────────────────────
 
 
 class SetupWizard(tk.Toplevel):
     """
-    Modal configuration dialog shown on first run (no config.json).
+    Modal dialog for first-run configuration of the trading app.
 
-    Collects all fields required by ``TraderConfig`` and writes the file
-    on "Save".  "Cancel" closes the application.
+    Collects MT5 path/account/credentials, trading parameters, and
+    Telegram bot token, then saves a ``TraderConfig`` to disk.
     """
 
-    def __init__(self, parent: tk.Tk) -> None:
-        super().__init__(parent)
-        self.title("XAUUSD Trader — First Run Setup")
+    def __init__(self, master: tk.Tk | tk.Toplevel) -> None:
+        super().__init__(master)
+        self.title("XAUUSD Trader — Setup")
+        self.geometry("600x700")
         self.resizable(False, False)
-        self._result: dict[str, Any] | None = None
-        self._cancelled = False
-
-        # Make this dialog modal (steal focus and block the parent)
-        self.transient(parent)
+        self.transient(master)
         self.grab_set()
 
-        self._build_ui()
+        self._result: dict | None = None
 
-        # Centre over parent
-        self.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - self.winfo_width()) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - self.winfo_height()) // 2
-        self.geometry(f"+{x}+{y}")
-
-        # Bind Enter key to Save
-        self.bind("<Return>", lambda _: self._on_save())
-        # Escape to Cancel
-        self.bind("<Escape>", lambda _: self._on_cancel())
-
-    # ── UI construction ─────────────────────────────────────────────────────
-
-    def _build_ui(self) -> None:
-        frame = ttk.Frame(self, padding=16)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        # ── Section: MT5 ──────────────────────────────────────────────────
-        ttk.Label(frame, text="MetaTrader 5", font=("TkDefaultFont", 10, "bold")).grid(
-            row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 4)
-        )
-
-        self._mt5_path_var = tk.StringVar(value="C:\\Program Files\\MetaTrader 5\\terminal64.exe")
-        self._mt5_account_var = tk.StringVar(value="0")
+        # StringVar for all form fields
+        self._mt5_path_var = tk.StringVar(value="C:\\MT5\\terminal.exe")
+        self._mt5_account_var = tk.StringVar(value="")
         self._mt5_password_var = tk.StringVar(value="")
         self._mt5_server_var = tk.StringVar(value="")
-
-        self._add_field(frame, "Terminal Path:", self._mt5_path_var, row=1)
-        self._add_field(frame, "Account ID:", self._mt5_account_var, row=2)
-        self._add_field(frame, "Password:", self._mt5_password_var, row=3, show="*")
-        self._add_field(frame, "Server:", self._mt5_server_var, row=4)
-
-        # ── Section: Trading ─────────────────────────────────────────────
-        row_offset = 5
-        ttk.Label(frame, text="Trading", font=("TkDefaultFont", 10, "bold")).grid(
-            row=row_offset, column=0, columnspan=3, sticky=tk.W, pady=(10, 4)
-        )
-
         self._symbol_var = tk.StringVar(value="XAUUSD")
         self._base_lot_var = tk.StringVar(value="0.01")
         self._mart_mult_var = tk.StringVar(value="2.0")
         self._max_levels_var = tk.StringVar(value="3")
         self._pos_a_ratio_var = tk.StringVar(value="60")
-
-        self._add_field(frame, "Symbol:", self._symbol_var, row=row_offset + 1)
-        self._add_field(frame, "Base Lot:", self._base_lot_var, row=row_offset + 2)
-        self._add_field(frame, "Martingale Multiplier:", self._mart_mult_var, row=row_offset + 3)
-        self._add_field(frame, "Max Martingale Levels:", self._max_levels_var, row=row_offset + 4)
-        self._add_field(frame, "Position Split A (%):", self._pos_a_ratio_var, row=row_offset + 5)
-
-        # B ratio label (auto-computed)
-        self._b_ratio_label = ttk.Label(frame, text="Position Split B (%): 40 (auto)")
-        self._b_ratio_label.grid(
-            row=row_offset + 6, column=1, sticky=tk.W, padx=(0, 4)
-        )
-        self._pos_a_ratio_var.trace_add("write", lambda *_: self._update_b_ratio())
-
-        # ── Section: Telegram ────────────────────────────────────────────
-        tg_row = row_offset + 7
-        ttk.Label(frame, text="Telegram", font=("TkDefaultFont", 10, "bold")).grid(
-            row=tg_row, column=0, columnspan=3, sticky=tk.W, pady=(10, 4)
-        )
-
         self._bot_token_var = tk.StringVar(value="")
-        self._add_field(frame, "Bot Token:", self._bot_token_var, row=tg_row + 1)
-
-        # ── Section: EA ──────────────────────────────────────────────────
-        ea_row = tg_row + 2
-        ttk.Label(frame, text="Expert Advisor", font=("TkDefaultFont", 10, "bold")).grid(
-            row=ea_row, column=0, columnspan=3, sticky=tk.W, pady=(10, 4)
-        )
-
         self._magic_var = tk.StringVar(value="20250605")
         self._sl_pips_var = tk.StringVar(value="50")
         self._tp1_pips_var = tk.StringVar(value="25")
         self._tp2_pips_var = tk.StringVar(value="50")
 
-        self._add_field(frame, "Magic Number:", self._magic_var, row=ea_row + 1)
-        self._add_field(frame, "SL (pips):", self._sl_pips_var, row=ea_row + 2)
-        self._add_field(frame, "TP1 (pips):", self._tp1_pips_var, row=ea_row + 3)
-        self._add_field(frame, "TP2 (pips):", self._tp2_pips_var, row=ea_row + 4)
+        # Build UI
+        container = ttk.Frame(self, padding=16)
+        container.pack(fill="both", expand=True)
 
-        # ── Buttons ─────────────────────────────────────────────────────
-        btn_row = ea_row + 5
-        btn_frame = ttk.Frame(frame)
-        btn_frame.grid(row=btn_row, column=0, columnspan=3, pady=(16, 0))
+        row = 0
 
-        ttk.Button(btn_frame, text="Cancel", command=self._on_cancel, width=12).pack(
-            side=tk.LEFT, padx=4
+        # ── MT5 Settings ────────────────────────────────────────────────────
+        ttk.Label(container, text="MT5 Settings", font=("Segoe UI", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 8)
         )
-        ttk.Button(btn_frame, text="Save", command=self._on_save, width=12).pack(
-            side=tk.LEFT, padx=4
-        )
+        row += 1
 
-    def _add_field(
-        self,
-        parent: ttk.Frame,
-        label: str,
-        var: tk.StringVar,
-        row: int,
-        show: str = "",
-    ) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, padx=(0, 8), pady=2)
-        entry = ttk.Entry(parent, textvariable=var, width=40, show=show)
-        entry.grid(row=row, column=1, columnspan=2, sticky=tk.EW, pady=2)
+        _add_field(container, row, "MT5 Path:", self._mt5_path_var)
+        row += 1
+        _add_field(container, row, "Account:", self._mt5_account_var)
+        row += 1
+        _add_field(container, row, "Password:", self._mt5_password_var)
+        row += 1
+        _add_field(container, row, "Server:", self._mt5_server_var)
+        row += 1
+
+        ttk.Separator(container).grid(row=row, column=0, columnspan=2, sticky="ew", pady=8)
+        row += 1
+
+        # ── Trading Settings ────────────────────────────────────────────────
+        ttk.Label(container, text="Trading Settings", font=("Segoe UI", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+        row += 1
+
+        _add_field(container, row, "Symbol:", self._symbol_var)
+        row += 1
+        _add_field(container, row, "Base Lot:", self._base_lot_var)
+        row += 1
+        _add_field(container, row, "Martingale Multiplier:", self._mart_mult_var)
+        row += 1
+        _add_field(container, row, "Max Martingale Levels:", self._max_levels_var)
+        row += 1
+
+        ttk.Separator(container).grid(row=row, column=0, columnspan=2, sticky="ew", pady=8)
+        row += 1
+
+        # ── Position Ratio ──────────────────────────────────────────────────
+        ttk.Label(container, text="Position Ratios", font=("Segoe UI", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+        row += 1
+
+        ttk.Label(container, text="Position A Ratio (%):").grid(
+            row=row, column=0, sticky="w", padx=(0, 8), pady=4
+        )
+        a_entry = ttk.Entry(container, textvariable=self._pos_a_ratio_var, width=15)
+        a_entry.grid(row=row, column=1, sticky="w", pady=4)
+        a_entry.bind("<KeyRelease>", lambda e: self._update_b_ratio())
+        row += 1
+
+        ttk.Label(container, text="Position B Ratio (%):").grid(
+            row=row, column=0, sticky="w", padx=(0, 8), pady=4
+        )
+        self._b_ratio_label = ttk.Label(container, text="40.0%")
+        self._b_ratio_label.grid(row=row, column=1, sticky="w", pady=4)
+        row += 1
+
+        ttk.Separator(container).grid(row=row, column=0, columnspan=2, sticky="ew", pady=8)
+        row += 1
+
+        # ── Magic Number & Pips ─────────────────────────────────────────────
+        ttk.Label(container, text="Order Parameters", font=("Segoe UI", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+        row += 1
+
+        _add_field(container, row, "Magic Number:", self._magic_var)
+        row += 1
+        _add_field(container, row, "SL Pips:", self._sl_pips_var)
+        row += 1
+        _add_field(container, row, "TP1 Pips:", self._tp1_pips_var)
+        row += 1
+        _add_field(container, row, "TP2 Pips:", self._tp2_pips_var)
+        row += 1
+
+        ttk.Separator(container).grid(row=row, column=0, columnspan=2, sticky="ew", pady=8)
+        row += 1
+
+        # ── Telegram Bot ────────────────────────────────────────────────────
+        ttk.Label(container, text="Telegram Bot", font=("Segoe UI", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+        row += 1
+
+        _add_field(container, row, "Bot Token:", self._bot_token_var)
+        row += 1
+
+        # ── Buttons ─────────────────────────────────────────────────────────
+        btn_frame = ttk.Frame(container)
+        btn_frame.grid(row=row, column=0, columnspan=2, pady=16)
+        ttk.Button(btn_frame, text="Save", command=self._on_save).pack(side="left", padx=8)
+        ttk.Button(btn_frame, text="Cancel", command=self._on_cancel).pack(side="left", padx=8)
+
+        self.wait_window()
 
     def _update_b_ratio(self) -> None:
+        """Compute position_b_ratio = 1.0 - a_ratio and update the label."""
         try:
-            a = float(self._pos_a_ratio_var.get())
-            b = 100.0 - a
-            self._b_ratio_label.config(text=f"Position Split B (%): {b:.1f} (auto)")
+            a_ratio = float(self._pos_a_ratio_var.get()) / 100.0
         except ValueError:
-            self._b_ratio_label.config(text="Position Split B (%): — (invalid)")
-
-    # ── Callbacks ───────────────────────────────────────────────────────────
+            a_ratio = 0.0
+        b_ratio = 1.0 - a_ratio
+        self._b_ratio_label.config(text=f"{b_ratio * 100:.1f}%")
 
     def _on_save(self) -> None:
+        """Validate inputs, create and save config, store result and close."""
         try:
-            a = float(self._pos_a_ratio_var.get())
-            b = 100.0 - a
-            from config_store import TraderConfig
-            cfg = TraderConfig(
-                mt5_path=self._mt5_path_var.get(),
-                mt5_account=int(self._mt5_account_var.get()),
-                mt5_password=self._mt5_password_var.get(),
-                mt5_server=self._mt5_server_var.get(),
-                symbol=self._symbol_var.get(),
-                base_lot=float(self._base_lot_var.get()),
-                martingale_multiplier=float(self._mart_mult_var.get()),
-                max_martingale_levels=int(self._max_levels_var.get()),
-                position_a_ratio=a / 100.0,
-                position_b_ratio=b / 100.0,
-                telegram_bot_token=self._bot_token_var.get(),
-                magic_number=int(self._magic_var.get()),
-                sl_pips=int(self._sl_pips_var.get()),
-                tp1_pips=int(self._tp1_pips_var.get()),
-                tp2_pips=int(self._tp2_pips_var.get()),
-            )
-            cfg.save()
-            self._result = {
-                "mt5_path": self._mt5_path_var.get(),
-                "mt5_account": int(self._mt5_account_var.get()),
-                "mt5_password": self._mt5_password_var.get(),
-                "mt5_server": self._mt5_server_var.get(),
-                "symbol": self._symbol_var.get(),
-                "base_lot": float(self._base_lot_var.get()),
-                "martingale_multiplier": float(self._mart_mult_var.get()),
-                "max_martingale_levels": int(self._max_levels_var.get()),
-                "position_a_ratio": a / 100.0,
-                "position_b_ratio": b / 100.0,
-                "telegram_bot_token": self._bot_token_var.get(),
-                "magic_number": int(self._magic_var.get()),
-                "sl_pips": int(self._sl_pips_var.get()),
-                "tp1_pips": int(self._tp1_pips_var.get()),
-                "tp2_pips": int(self._tp2_pips_var.get()),
-            }
-            self.destroy()
-        except ValueError as exc:
-            tk.messagebox.showerror("Validation Error", f"Invalid input: {exc}", parent=self)
+            mt5_path = self._mt5_path_var.get()
+            mt5_account = int(self._mt5_account_var.get()) if self._mt5_account_var.get() else 0
+            mt5_password = self._mt5_password_var.get()
+            mt5_server = self._mt5_server_var.get()
+            symbol = self._symbol_var.get()
+            base_lot = float(self._base_lot_var.get())
+            mart_mult = float(self._mart_mult_var.get())
+            max_levels = int(self._max_levels_var.get())
+            pos_a_ratio = float(self._pos_a_ratio_var.get()) / 100.0
+            pos_b_ratio = 1.0 - pos_a_ratio
+            bot_token = self._bot_token_var.get()
+            magic = int(self._magic_var.get())
+            sl_pips = int(self._sl_pips_var.get())
+            tp1_pips = int(self._tp1_pips_var.get())
+            tp2_pips = int(self._tp2_pips_var.get())
 
-    def _on_cancel(self) -> None:
-        self._cancelled = True
+            config = TraderConfig(
+                mt5_path=mt5_path,
+                mt5_account=mt5_account,
+                mt5_password=mt5_password,
+                mt5_server=mt5_server,
+                symbol=symbol,
+                symbol_aliases={"GOLD": "XAUUSD", "XAU/USD": "XAUUSD"},
+                base_lot=base_lot,
+                martingale_multiplier=mart_mult,
+                max_martingale_levels=max_levels,
+                position_a_ratio=pos_a_ratio,
+                position_b_ratio=pos_b_ratio,
+                magic_number=magic,
+                telegram_bot_token=bot_token,
+                sl_pips=sl_pips,
+                tp1_pips=tp1_pips,
+                tp2_pips=tp2_pips,
+            )
+            config.validate()
+            config.save()
+
+            self._result = {
+                "mt5_path": mt5_path,
+                "mt5_account": mt5_account,
+                "mt5_password": mt5_password,
+                "mt5_server": mt5_server,
+                "symbol": symbol,
+                "symbol_aliases": {"GOLD": "XAUUSD", "XAU/USD": "XAUUSD"},
+                "base_lot": base_lot,
+                "martingale_multiplier": mart_mult,
+                "max_martingale_levels": max_levels,
+                "position_a_ratio": pos_a_ratio,
+                "position_b_ratio": pos_b_ratio,
+                "magic_number": magic,
+                "telegram_bot_token": bot_token,
+                "sl_pips": sl_pips,
+                "tp1_pips": tp1_pips,
+                "tp2_pips": tp2_pips,
+                "pip_value": 0.10,
+                "mt5_connect_retries": 5,
+                "mt5_connect_retry_delay": 10,
+                "state_file": "state.json",
+                "config_file": "config.json",
+            }
+        except Exception as exc:
+            messagebox.showerror("Validation Error", str(exc))
+            return
+
         self.destroy()
 
-    # ── Public API ──────────────────────────────────────────────────────────
+    def _on_cancel(self) -> None:
+        """Cancel and close without saving."""
+        self._result = None
+        self.destroy()
 
-    def get_result(self) -> dict[str, Any] | None:
-        """Return the collected config dict, or None if cancelled."""
-        return None if self._cancelled else self._result
+    def get_result(self) -> dict | None:
+        """Return the saved configuration dict or None if cancelled."""
+        return self._result
 
 
 # ── Dashboard Tab ─────────────────────────────────────────────────────────────
 
 
 class _DashboardTab(ttk.Frame):
-    """Dashboard tab showing connection status, martingale state, and latest signal."""
+    """
+    Main dashboard tab showing connection status, bot status,
+    martingale state, and the latest signal.
+    """
 
     def __init__(
         self,
         parent: ttk.Notebook,
         engine: MT5Engine,
-        bot_ref: "dict[str, SignalBot | None]",
-        log: logging.Logger,
+        bot_ref: dict,
+        logger: logging.Logger,
     ) -> None:
-        super().__init__(parent, padding=12)
+        super().__init__(parent)
         self._engine = engine
         self._bot_ref = bot_ref
-        self._log = log
+        self._log = logger
 
+        # State display vars
         self._mt5_status_var = tk.StringVar(value="Disconnected")
         self._bot_status_var = tk.StringVar(value="Stopped")
-        self._level_var = tk.StringVar(value="Level: 0")
-        self._lot_var = tk.StringVar(value="Lot: —")
-        self._signal_var = tk.StringVar(value="No signal received yet")
+        self._level_var = tk.StringVar(value="0")
+        self._lot_var = tk.StringVar(value="0.01")
+        self._latest_signal_var = tk.StringVar(value="No signal received")
 
-        self._build_ui()
+        content = ttk.Frame(self, padding=16)
+        content.pack(fill="both", expand=True)
 
-    def _build_ui(self) -> None:
-        ttk.Label(self, text="MT5 Connection", font=("TkDefaultFont", 10, "bold")).grid(
-            row=0, column=0, sticky=tk.W, pady=(0, 4)
+        # ── MT5 Section ─────────────────────────────────────────────────────
+        ttk.Label(content, text="MT5 Connection", font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
         )
-        ttk.Label(self, textvariable=self._mt5_status_var, foreground="red").grid(
-            row=1, column=0, sticky=tk.W
+        ttk.Label(content, text="Status:").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Label(content, textvariable=self._mt5_status_var).grid(
+            row=1, column=1, sticky="w", pady=4
         )
-        self._connect_btn = ttk.Button(
-            self, text="Connect", command=self._on_mt5_connect
+        self._mt5_btn = ttk.Button(
+            content, text="Connect", command=self._on_mt5_connect
         )
-        self._connect_btn.grid(row=2, column=0, sticky=tk.W, pady=(4, 16))
+        self._mt5_btn.grid(row=2, column=0, columnspan=2, pady=8)
 
-        ttk.Label(self, text="Telegram Bot", font=("TkDefaultFont", 10, "bold")).grid(
-            row=3, column=0, sticky=tk.W, pady=(0, 4)
+        ttk.Separator(content).grid(row=3, column=0, columnspan=2, sticky="ew", pady=8)
+
+        # ── Bot Section ─────────────────────────────────────────────────────
+        ttk.Label(content, text="Telegram Bot", font=("Segoe UI", 10, "bold")).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(0, 8)
         )
-        ttk.Label(self, textvariable=self._bot_status_var, foreground="red").grid(
-            row=4, column=0, sticky=tk.W
+        ttk.Label(content, text="Status:").grid(row=5, column=0, sticky="w", pady=4)
+        ttk.Label(content, textvariable=self._bot_status_var).grid(
+            row=5, column=1, sticky="w", pady=4
         )
         self._bot_btn = ttk.Button(
-            self, text="Start Bot", command=self._on_bot_toggle
+            content, text="Start Bot", command=self._on_bot_toggle
         )
-        self._bot_btn.grid(row=5, column=0, sticky=tk.W, pady=(4, 16))
+        self._bot_btn.grid(row=6, column=0, columnspan=2, pady=8)
 
-        ttk.Separator(self, orient=tk.HORIZONTAL).grid(
-            row=6, column=0, columnspan=2, sticky=tk.EW, pady=8
+        ttk.Separator(content).grid(row=7, column=0, columnspan=2, sticky="ew", pady=8)
+
+        # ── Martingale State ────────────────────────────────────────────────
+        ttk.Label(content, text="Martingale State", font=("Segoe UI", 10, "bold")).grid(
+            row=8, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(content, text="Level:").grid(row=9, column=0, sticky="w", pady=4)
+        ttk.Label(content, textvariable=self._level_var).grid(
+            row=9, column=1, sticky="w", pady=4
+        )
+        ttk.Label(content, text="Current Lot:").grid(row=10, column=0, sticky="w", pady=4)
+        ttk.Label(content, textvariable=self._lot_var).grid(
+            row=10, column=1, sticky="w", pady=4
         )
 
-        ttk.Label(self, text="Martingale State", font=("TkDefaultFont", 10, "bold")).grid(
-            row=7, column=0, sticky=tk.W, pady=(0, 4)
-        )
-        ttk.Label(self, textvariable=self._level_var).grid(row=8, column=0, sticky=tk.W)
-        ttk.Label(self, textvariable=self._lot_var).grid(row=9, column=0, sticky=tk.W, pady=(0, 16))
+        ttk.Separator(content).grid(row=11, column=0, columnspan=2, sticky="ew", pady=8)
 
-        ttk.Label(self, text="Latest Signal", font=("TkDefaultFont", 10, "bold")).grid(
-            row=10, column=0, sticky=tk.W, pady=(0, 4)
+        # ── Latest Signal ───────────────────────────────────────────────────
+        ttk.Label(content, text="Latest Signal", font=("Segoe UI", 10, "bold")).grid(
+            row=12, column=0, columnspan=2, sticky="w", pady=(0, 8)
         )
-        self._signal_label = ttk.Label(self, textvariable=self._signal_var, wraplength=400)
-        self._signal_label.grid(row=11, column=0, sticky=tk.W)
-
-        # Configure grid weights so the frame expands properly
-        self.columnconfigure(0, weight=1)
+        ttk.Label(content, textvariable=self._latest_signal_var).grid(
+            row=13, column=0, columnspan=2, sticky="w", pady=4
+        )
 
     def _on_mt5_connect(self) -> None:
-        if self._engine.is_connected():
+        """Toggle MT5 connection state."""
+        if not self._engine.is_connected():
+            success = self._engine.connect()
+            if success:
+                self._mt5_status_var.set("Connected")
+                self._mt5_btn.config(text="Disconnect")
+            else:
+                messagebox.showerror("MT5 Error", "Failed to connect to MT5 terminal.")
+        else:
             self._engine.disconnect()
             self._mt5_status_var.set("Disconnected")
-            self._connect_btn.config(text="Connect")
-            self._log.info("MT5 disconnected via dashboard.")
-        else:
-            ok = self._engine.connect()
-            if ok:
-                self._mt5_status_var.set("Connected")
-                self._connect_btn.config(text="Disconnect")
-                self._log.info("MT5 connected via dashboard.")
-            else:
-                self._mt5_status_var.set("Connection Failed")
-                self._log.error("MT5 connection failed via dashboard.")
+            self._mt5_btn.config(text="Connect")
 
     def _on_bot_toggle(self) -> None:
+        """Toggle Telegram bot start/stop."""
         bot = self._bot_ref.get("bot")
         if bot is None or not bot.is_running():
-            if bot is None:
-                token = self._engine.config.telegram_bot_token
-                if not token:
-                    self._log.warning("Cannot start bot: no token in config.")
-                    return
-                q: queue.Queue[Signal] = queue.Queue()
-                bot = SignalBot(token, q, self._engine.config.symbol_aliases)
-                self._bot_ref["bot"] = bot
+            # Start bot
+            token = self._engine.config.telegram_bot_token
+            if not token:
+                messagebox.showwarning("No Token", "Telegram bot token not configured.")
+                return
+            signal_queue = self._bot_ref.get("queue", queue.Queue())
+            bot = SignalBot(
+                token,
+                signal_queue,
+                aliases=self._engine.config.symbol_aliases,
+            )
             bot.start()
+            self._bot_ref["bot"] = bot
             self._bot_status_var.set("Running")
             self._bot_btn.config(text="Stop Bot")
-            self._log.info("Telegram bot started via dashboard.")
         else:
+            # Stop bot
             bot.stop()
+            self._bot_ref["bot"] = None
             self._bot_status_var.set("Stopped")
             self._bot_btn.config(text="Start Bot")
-            self._log.info("Telegram bot stopped via dashboard.")
 
-    def update_martingale_state(self, level: int, lot: float) -> None:
-        self._level_var.set(f"Level: {level}")
-        self._lot_var.set(f"Lot: {lot:.4f}")
-
-    def update_latest_signal(self, sig: Signal | None) -> None:
-        if sig is None:
-            self._signal_var.set("No signal received yet")
-        else:
-            self._signal_var.set(
-                f"{sig.action} {sig.symbol} @ {sig.entry}  "
-                f"SL={sig.sl}  TP1={sig.tp1}  TP2={sig.tp2}"
-            )
+    def update_latest_signal(self, signal: Signal) -> None:
+        """Update the label showing the latest received signal."""
+        self._latest_signal_var.set(
+            f"{signal.action} {signal.symbol} @ {signal.entry} "
+            f"| SL={signal.sl} TP1={signal.tp1} TP2={signal.tp2}"
+        )
 
 
 # ── Manual Entry Tab ──────────────────────────────────────────────────────────
 
 
 class _ManualEntryTab(ttk.Frame):
-    """Manual signal entry tab with form fields and an Execute button."""
+    """
+    Tab for manually entering trading signals without Telegram.
+    """
 
     def __init__(
         self,
         parent: ttk.Notebook,
         engine: MT5Engine,
-        on_executed: Any,
-        log: logging.Logger,
+        signal_callback,
+        logger: logging.Logger,
     ) -> None:
-        super().__init__(parent, padding=12)
+        super().__init__(parent)
         self._engine = engine
-        self._on_executed = on_executed
-        self._log = log
+        self._signal_callback = signal_callback
+        self._log = logger
 
+        # Form StringVars
         self._action_var = tk.StringVar(value="BUY")
         self._symbol_var = tk.StringVar(value=engine.config.symbol)
         self._entry_var = tk.StringVar(value="")
@@ -399,67 +416,87 @@ class _ManualEntryTab(ttk.Frame):
         self._tp2_var = tk.StringVar(value="")
         self._lot_var = tk.StringVar(value=str(engine.config.base_lot))
 
-        self._build_ui()
+        content = ttk.Frame(self, padding=16)
+        content.pack(fill="both", expand=True)
 
-    def _build_ui(self) -> None:
         row = 0
 
-        ttk.Label(self, text="Action:").grid(row=row, column=0, sticky=tk.W, pady=3)
-        action_combo = ttk.Combobox(
-            self, textvariable=self._action_var, values=["BUY", "SELL"], state="readonly", width=10
+        ttk.Label(content, text="Manual Signal Entry", font=("Segoe UI", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 12)
         )
-        action_combo.grid(row=row, column=1, sticky=tk.W, pady=3)
-
         row += 1
-        ttk.Label(self, text="Symbol:").grid(row=row, column=0, sticky=tk.W, pady=3)
-        ttk.Entry(self, textvariable=self._symbol_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=3)
 
+        # Action
+        ttk.Label(content, text="Action:").grid(row=row, column=0, sticky="w", pady=4)
+        action_combo = ttk.Combobox(
+            content, textvariable=self._action_var, values=["BUY", "SELL"], state="readonly", width=15
+        )
+        action_combo.grid(row=row, column=1, sticky="w", pady=4)
+        action_combo.current(0)
         row += 1
-        ttk.Label(self, text="Entry Price:").grid(row=row, column=0, sticky=tk.W, pady=3)
-        ttk.Entry(self, textvariable=self._entry_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=3)
 
+        _add_field(content, row, "Symbol:", self._symbol_var)
         row += 1
-        ttk.Label(self, text="SL Price:").grid(row=row, column=0, sticky=tk.W, pady=3)
-        ttk.Entry(self, textvariable=self._sl_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=3)
-
+        _add_field(content, row, "Entry Price:", self._entry_var)
         row += 1
-        ttk.Label(self, text="TP1 Price:").grid(row=row, column=0, sticky=tk.W, pady=3)
-        ttk.Entry(self, textvariable=self._tp1_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=3)
-
+        _add_field(content, row, "Stop Loss:", self._sl_var)
         row += 1
-        ttk.Label(self, text="TP2 Price:").grid(row=row, column=0, sticky=tk.W, pady=3)
-        ttk.Entry(self, textvariable=self._tp2_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=3)
-
+        _add_field(content, row, "TP1 Price:", self._tp1_var)
         row += 1
-        ttk.Label(self, text="Lot:").grid(row=row, column=0, sticky=tk.W, pady=3)
-        ttk.Entry(self, textvariable=self._lot_var, width=20).grid(row=row, column=1, sticky=tk.W, pady=3)
-
+        _add_field(content, row, "TP2 Price:", self._tp2_var)
         row += 1
-        self._execute_btn = ttk.Button(self, text="Execute Signal", command=self._on_execute)
-        self._execute_btn.grid(row=row, column=0, columnspan=2, pady=(16, 0))
+        _add_field(content, row, "Lot:", self._lot_var)
+        row += 1
 
-        self.columnconfigure(1, weight=1)
+        ttk.Button(content, text="Execute Signal", command=self._on_execute).grid(
+            row=row, column=0, columnspan=2, pady=16
+        )
 
     def _on_execute(self) -> None:
+        """Read form fields, create Signal, call callback and engine."""
         try:
             sig = Signal(
-                action=self._action_var.get().upper(),
-                symbol=self._symbol_var.get().upper(),
+                action=self._action_var.get(),
+                symbol=self._symbol_var.get(),
                 entry=float(self._entry_var.get()),
                 sl=float(self._sl_var.get()),
                 tp1=float(self._tp1_var.get()),
                 tp2=float(self._tp2_var.get()),
             )
         except ValueError as exc:
-            self._log.warning("Manual entry form has invalid data: %s", exc)
-            tk.messagebox.showerror("Validation Error", f"Invalid input: {exc}", parent=self)
+            messagebox.showerror("Invalid Input", f"Check numeric fields: {exc}")
             return
 
-        self._engine.config.base_lot = float(self._lot_var.get())
-        ok = self._engine.process_signal(sig)
-        status = "SUCCESS" if ok else "FAILED"
-        self._log.info("Manual signal %s: %s %s @ %s", status, sig.action, sig.symbol, sig.entry)
-        self._on_executed(sig)
+        self._signal_callback(sig)
+        self._engine.process_signal(sig)
+
+
+# ── Queue Logging Handler ─────────────────────────────────────────────────────
+
+
+class _QueueLoggingHandler(logging.Handler):
+    """
+    Custom logging handler that schedules GUI widget updates on the main thread.
+
+    Must use ``widget.after(0, ...)`` to safely update the ScrolledText widget
+    from the logging thread.
+    """
+
+    def __init__(self, widget: tk.scrolledtext.ScrolledText) -> None:
+        super().__init__()
+        self._widget = widget
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Schedule ``_append`` to run on the main GUI thread."""
+        # Pass record as default arg to capture it at call time
+        self._widget.after(0, lambda: self._append(record))
+
+    def _append(self, record: logging.LogRecord) -> None:
+        """Append a formatted log record to the ScrolledText widget."""
+        self._widget.configure(state="normal")
+        self._widget.insert("end", f"{record.getMessage()}\n")
+        self._widget.see("end")
+        self._widget.configure(state="disabled")
 
 
 # ── Main Application ──────────────────────────────────────────────────────────
@@ -467,158 +504,150 @@ class _ManualEntryTab(ttk.Frame):
 
 class TraderApp(tk.Tk):
     """
-    Root window of the XAUUSD Trader desktop application.
+    Main application window for the XAUUSD Trader Desktop app.
 
-    On construction:
-      1. Checks for ``config.json``; if missing, blocks on the modal SetupWizard.
-      2. Initialises ``MT5Engine`` (not yet connected).
-      3. Builds the three-tab notebook.
-      4. Attaches a ``_QueueLoggingHandler`` to the log ScrolledText.
-      5. Starts the queue-polling loop (``after(100, ...)``).
-
-    Parameters
-    ----------
-    config_path: str | None
-        Optional path to the config file.  Defaults to ``config.json`` in
-        the current working directory.
+    Orchestrates the MT5 engine, Telegram bot, and manual signal entry
+    through a tabbed GUI.
     """
 
-    def __init__(self, config_path: str | None = None) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.title("XAUUSD Trader")
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.title("XAUUSD Trader Desktop")
+        self.geometry("800x600")
 
-        # ── 1. Load or create configuration ──────────────────────────────
-        self._config_path = config_path or "config.json"
-        self._engine: MT5Engine | None = None
-        self._bot_ref: dict[str, SignalBot | None] = {"bot": None}
-        self._signal_queue: queue.Queue[Signal] = queue.Queue()
-        self._latest_signal: Signal | None = None
-        self._log = logging.getLogger("trader_app")
-
-        # Block on modal wizard until config exists
-        self._ensure_config()
-
-        # ── 2. Build MT5 engine ──────────────────────────────────────────
-        config = TraderConfig.load(self._config_path)
-        self._engine = MT5Engine(config)
-
-        # ── 3. Build UI ──────────────────────────────────────────────────
-        self._build_ui()
-
-        # ── 4. Start queue polling ───────────────────────────────────────
-        self._polling_active = True
-        self._poll_queue()
-
-    def _ensure_config(self) -> None:
-        """Show the setup wizard if config.json is absent."""
-        import os
-
-        if not os.path.exists(self._config_path):
-            self.withdraw()  # hide main window while wizard is open
+        # Load config; show setup wizard if path is missing
+        self.trader_config = TraderConfig.load()
+        if not self.trader_config.mt5_path:
+            # Hide the main window so the modal wizard is the only visible window.
+            # This also ensures the window manager registers the parent before the
+            # transient dialog is created, preventing the wizard from failing to map.
+            self.withdraw()
+            self.update_idletasks()
             wizard = SetupWizard(self)
-            self.wait_window(wizard)  # block until wizard closes
             result = wizard.get_result()
-
             if result is None:
-                # User cancelled — exit immediately
                 self.destroy()
                 return
+            # Reload config from wizard result
+            self.trader_config = TraderConfig(**result)
+            self.deiconify()
 
-            cfg = TraderConfig(mt5_path=result["mt5_path"], **result)
-            cfg.save(self._config_path)
-            self._log.info("Config saved to %s.", self._config_path)
-            self.deiconify()  # restore main window
+        # Core components
+        self._engine = MT5Engine(self.trader_config)
+        self._format_manager = get_manager()
+        self._signal_queue: queue.Queue[Signal] = queue.Queue()
+        self._bot_ref: dict = {"bot": None, "queue": self._signal_queue}
+        self._polling_active = True
+        self._latest_signal: Signal | None = None
 
-    def _build_ui(self) -> None:
+        # Notebook tabs
         notebook = ttk.Notebook(self)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        notebook.pack(fill="both", expand=True, padx=8, pady=8)
 
-        # ── Tab 1: Dashboard ──────────────────────────────────────────────
+        # Dashboard tab
         self._dashboard = _DashboardTab(
-            notebook, self._engine, self._bot_ref, self._log
+            notebook, self._engine, self._bot_ref, _log
         )
         notebook.add(self._dashboard, text="Dashboard")
 
-        # ── Tab 2: Manual Entry ───────────────────────────────────────────
-        self._manual_tab = _ManualEntryTab(
-            notebook, self._engine, self._on_signal_executed, self._log
+        # Manual Entry tab
+        manual_tab = _ManualEntryTab(
+            notebook, self._engine, self._on_manual_signal, _log
         )
-        notebook.add(self._manual_tab, text="Manual Entry")
+        notebook.add(manual_tab, text="Manual Entry")
 
-        # ── Tab 3: Log ───────────────────────────────────────────────────
-        log_frame = ttk.Frame(notebook, padding=4)
-        notebook.add(log_frame, text="Log")
-
-        self._log_text = scrolledtext.ScrolledText(
-            log_frame, state="disabled", height=20, font=("Courier New", 9)
+        # Log tab
+        self._log_widget = tk.scrolledtext.ScrolledText(
+            notebook, state="disabled", height=15
         )
-        self._log_text.pack(fill=tk.BOTH, expand=True)
+        self._log_widget.pack(fill="both", expand=True)
+        notebook.add(self._log_widget, text="Log")
 
-        handler = _QueueLoggingHandler(self._log_text)
+        # Signal Formats tab
+        formats_tab = _SignalFormatsTab(notebook, self._format_manager, _log)
+        notebook.add(formats_tab, text="Signal Formats")
+
+        # Attach logging handler
+        handler = _QueueLoggingHandler(self._log_widget)
         handler.setLevel(logging.INFO)
-        logging.getLogger().addHandler(handler)
-        # Ensure the root logger propagates so the handler sees messages
-        logging.getLogger().setLevel(logging.INFO)
+        _log.addHandler(handler)
+        _log.setLevel(logging.INFO)
+        _log.info("XAUUSD Trader Desktop started.")
 
-        self._log.info("XAUUSD Trader started.")
+        # Start polling loop
+        self.after(1000, self._poll_queue)
 
-    # ── Queue polling ────────────────────────────────────────────────────────
+        # Handle window close
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _poll_queue(self) -> None:
-        """
-        Poll ``self._signal_queue`` and dispatch any received ``Signal`` objects.
-
-        Runs on the main thread via ``after(100, ...)`` so it never blocks
-        the GUI.  The flag ``self._polling_active`` is cleared on shutdown.
-        """
+        """Poll signal queue and process signals; reschedule self."""
         if not self._polling_active:
             return
 
         try:
-            while True:
-                sig = self._signal_queue.get_nowait()
-                if self._engine is not None:
-                    ok = self._engine.process_signal(sig)
-                    self._log.info(
-                        "Queue signal %s: %s %s @ %s",
-                        "SUCCESS" if ok else "FAILED",
-                        sig.action, sig.symbol, sig.entry,
-                    )
-                self._latest_signal = sig
-                self._dashboard.update_latest_signal(sig)
+            signal = self._signal_queue.get_nowait()
+            self._engine.process_signal(signal)
+            self._latest_signal = signal
+            self._dashboard.update_latest_signal(signal)
         except queue.Empty:
             pass
 
-        self.after(100, self._poll_queue)
+        if self._polling_active:
+            self.after(1000, self._poll_queue)
 
-    # ── Callbacks ────────────────────────────────────────────────────────────
-
-    def _on_signal_executed(self, sig: Signal | None = None) -> None:
-        """Called by the manual-entry tab after a signal is executed."""
-        self._latest_signal = sig
-        self._dashboard.update_latest_signal(sig)
-
-    # ── Shutdown ─────────────────────────────────────────────────────────────
+    def _on_manual_signal(self, signal: Signal) -> None:
+        """Callback for signals entered via Manual Entry tab."""
+        _log.info(
+            "Manual signal: %s %s @ %s SL=%s TP1=%s TP2=%s",
+            signal.action, signal.symbol, signal.entry,
+            signal.sl, signal.tp1, signal.tp2,
+        )
 
     def _on_close(self) -> None:
-        """Graceful shutdown: stop bot, disconnect MT5, destroy window."""
-        self._log.info("Shutdown requested.")
+        """Clean shutdown: stop polling, stop bot, disconnect MT5."""
         self._polling_active = False
-
-        # Stop Telegram bot
         bot = self._bot_ref.get("bot")
-        if bot is not None and bot.is_running():
+        if bot is not None:
             bot.stop()
-            self._log.info("Telegram bot stopped.")
-
-        # Disconnect MT5
-        if self._engine is not None and self._engine.is_connected():
-            self._engine.disconnect()
-            self._log.info("MT5 disconnected.")
-
+        self._engine.disconnect()
         self.destroy()
 
-    def run(self) -> None:
-        """Alias for ``self.mainloop()`` as specified in the spec."""
-        self.mainloop()
+
+# ── Helper ────────────────────────────────────────────────────────────────────
+
+
+def _add_field(
+    parent: ttk.Frame,
+    row: int,
+    label_text: str,
+    var: tk.StringVar,
+) -> None:
+    """Add a label + entry row to a parent frame."""
+    ttk.Label(parent, text=label_text).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+    ttk.Entry(parent, textvariable=var, width=30).grid(row=row, column=1, sticky="w", pady=4)
+
+
+# ── Entry Point ───────────────────────────────────────────────────────────────
+
+
+def _ensure_exe_dir() -> None:
+    """When running as a PyInstaller bundled executable, change cwd to the
+    directory containing the .exe so that config.json and state.json are
+    created next to the executable, not in the user's Downloads/Desktop folder.
+    """
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(sys.executable)
+        if exe_dir:
+            os.chdir(exe_dir)
+
+
+def main() -> None:
+    """Create and run the main application window."""
+    _ensure_exe_dir()
+    app = TraderApp()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
