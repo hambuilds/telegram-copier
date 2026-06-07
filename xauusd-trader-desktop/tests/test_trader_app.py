@@ -330,6 +330,10 @@ class TestQueuePolling(_TempDirFixture):
         )
         sq.put(sig)
 
+        # Mock config fields needed by PnL check
+        mock_engine.config.pnl_target = 0
+        mock_engine.config.pnl_check_interval_seconds = 0
+
         # Manually construct a minimal app object (bypass __init__)
         app = trader_app.TraderApp.__new__(trader_app.TraderApp)
         app._engine = mock_engine
@@ -338,6 +342,7 @@ class TestQueuePolling(_TempDirFixture):
         app._latest_signal = None
         app._dashboard = MagicMock()
         app._log = logging.getLogger("test")
+        app._last_pnl_check = 0.0
         # _poll_queue schedules itself via self.after() — mock it out
         app.after = MagicMock()
 
@@ -429,6 +434,72 @@ class TestShutdownSequence(_TempDirFixture):
         mock_bot.stop.assert_called_once()
         mock_engine.disconnect.assert_called_once()
         self.assertFalse(app._polling_active)
+
+
+# ── PnL monitoring tests ──────────────────────────────────────────────────────
+
+
+class TestPnLMonitoring(_TempDirFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        _make_fake_config("config.json")
+
+    @patch("trader_app.time")
+    @patch("mt5_engine.MT5Engine")
+    @patch("telegram_bot.SignalBot")
+    def test_poll_triggers_pnl_check_and_update(
+        self, _: MagicMock, mock_engine_cls: MagicMock, mock_time: MagicMock
+    ) -> None:
+        import trader_app
+        import queue
+
+        mock_time.time.return_value = 1000.0
+
+        mock_engine = MagicMock()
+        mock_engine.is_connected.return_value = False
+        mock_engine.process_signal.return_value = True
+        mock_engine.config.symbol = "XAUUSD"
+        mock_engine.config.symbol_aliases = {"GOLD": "XAUUSD"}
+        mock_engine.config.magic_number = 20250605
+        mock_engine.config.pnl_target = 100.0
+        mock_engine.config.pnl_check_interval_seconds = 10
+        mock_engine.config.state_file = "state.json"
+        mock_engine_cls.return_value = mock_engine
+
+        # App with empty queue
+        sq: queue.Queue = queue.Queue()
+        app = trader_app.TraderApp.__new__(trader_app.TraderApp)
+        app._engine = mock_engine
+        app._signal_queue = sq
+        app._polling_active = True
+        app._latest_signal = None
+        app._dashboard = MagicMock()
+        app._log = logging.getLogger("test")
+        app._last_pnl_check = 0.0
+        app.after = MagicMock()
+        # Mock messagebox so showinfo doesn't block
+        trader_app.messagebox.showinfo = MagicMock()
+
+        # First poll: PnL below target — just update display
+        mock_engine.get_total_floating_pnl.return_value = 50.0
+        mock_engine.close_all_positions.return_value = []
+
+        app._poll_queue()
+
+        mock_engine.get_total_floating_pnl.assert_called()
+        app._dashboard.update_pnl_display.assert_called()
+        mock_engine.close_all_positions.assert_not_called()
+
+        # Second poll: PnL reaches target — auto-close
+        mock_time.time.return_value = 1011.0  # 11 sec elapsed (> interval of 10)
+        mock_engine.get_total_floating_pnl.return_value = 150.0
+        app._last_pnl_check = 1000.0
+
+        app._poll_queue()
+
+        mock_engine.close_all_positions.assert_called_once_with(magic=mock_engine.config.magic_number)
+        mock_engine.reset_martingale_state.assert_called_once()
+        trader_app.messagebox.showinfo.assert_called()
 
 
 # ── Import sanity test ────────────────────────────────────────────────────────

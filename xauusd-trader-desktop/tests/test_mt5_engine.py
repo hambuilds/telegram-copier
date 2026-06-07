@@ -279,6 +279,168 @@ class TestProcessSignal(unittest.TestCase):
         self.assertFalse(self.engine.process_signal(sig))
 
 
+class TestGetAccountInfo(unittest.TestCase):
+    """get_account_info() returns a dict with balance/equity/margin/profit or None."""
+
+    def test_returns_dict_on_success(self):
+        mock = make_mock_mt5()
+        acc = MagicMock()
+        acc.balance = 10000.0
+        acc.equity = 10500.0
+        acc.margin = 500.0
+        acc.margin_free = 10000.0
+        acc.profit = 500.0
+        mock.account_info.return_value = acc
+        install_mock(mock)
+
+        engine = MT5Engine(make_config())
+        info = engine.get_account_info()
+        self.assertIsInstance(info, dict)
+        self.assertEqual(info["balance"], 10000.0)
+        self.assertEqual(info["equity"], 10500.0)
+        self.assertEqual(info["margin"], 500.0)
+        self.assertEqual(info["margin_free"], 10000.0)
+        self.assertEqual(info["profit"], 500.0)
+
+    def test_returns_none_when_account_info_is_none(self):
+        mock = make_mock_mt5()
+        mock.account_info.return_value = None
+        install_mock(mock)
+
+        engine = MT5Engine(make_config())
+        self.assertIsNone(engine.get_account_info())
+
+
+class TestGetTotalFloatingPnl(unittest.TestCase):
+    """get_total_floating_pnl() sums position.profit, optionally filtering by magic."""
+
+    def test_sums_all_positions(self):
+        mock = make_mock_mt5()
+        pos1 = MagicMock(profit=10.5, magic=20250605)
+        pos2 = MagicMock(profit=-3.2, magic=20250605)
+        mock.positions_get.return_value = [pos1, pos2]
+        install_mock(mock)
+
+        engine = MT5Engine(make_config())
+        self.assertAlmostEqual(engine.get_total_floating_pnl(), 7.3)
+
+    def test_filters_by_magic(self):
+        mock = make_mock_mt5()
+        pos1 = MagicMock(profit=10.0, magic=20250605)
+        pos2 = MagicMock(profit=-5.0, magic=999999)
+        mock.positions_get.return_value = [pos1, pos2]
+        install_mock(mock)
+
+        engine = MT5Engine(make_config())
+        self.assertAlmostEqual(engine.get_total_floating_pnl(magic=20250605), 10.0)
+        self.assertAlmostEqual(engine.get_total_floating_pnl(magic=999999), -5.0)
+
+    def test_returns_zero_when_no_positions(self):
+        mock = make_mock_mt5()
+        mock.positions_get.return_value = []
+        install_mock(mock)
+
+        engine = MT5Engine(make_config())
+        self.assertEqual(engine.get_total_floating_pnl(), 0.0)
+
+
+class TestCloseAllPositions(unittest.TestCase):
+    """close_all_positions() closes every open position, returning successful tickets."""
+
+    def test_closes_all_positions(self):
+        mock = make_mock_mt5()
+        pos1 = MagicMock(ticket=100, symbol="XAUUSD", type=mock.ORDER_TYPE_BUY, volume=0.01, magic=20250605)
+        pos2 = MagicMock(ticket=200, symbol="XAUUSD", type=mock.ORDER_TYPE_SELL, volume=0.01, magic=20250605)
+        mock.positions_get.return_value = [pos1, pos2]
+
+        ok = MagicMock()
+        ok.retcode = mock.TRADE_RETCODE_DONE
+        mock.order_send.return_value = ok
+        install_mock(mock)
+
+        engine = MT5Engine(make_config())
+        closed = engine.close_all_positions()
+        self.assertEqual(sorted(closed), [100, 200])
+
+    def test_filters_by_magic(self):
+        mock = make_mock_mt5()
+        pos1 = MagicMock(ticket=100, symbol="XAUUSD", type=mock.ORDER_TYPE_BUY, volume=0.01, magic=20250605)
+        pos2 = MagicMock(ticket=200, symbol="XAUUSD", type=mock.ORDER_TYPE_SELL, volume=0.01, magic=999999)
+        mock.positions_get.return_value = [pos1, pos2]
+
+        ok = MagicMock()
+        ok.retcode = mock.TRADE_RETCODE_DONE
+        mock.order_send.return_value = ok
+        install_mock(mock)
+
+        engine = MT5Engine(make_config())
+        closed = engine.close_all_positions(magic=20250605)
+        self.assertEqual(closed, [100])
+
+    def test_partial_failure_returns_only_successes(self):
+        mock = make_mock_mt5()
+        pos1 = MagicMock(ticket=100, symbol="XAUUSD", type=mock.ORDER_TYPE_BUY, volume=0.01, magic=20250605)
+        pos2 = MagicMock(ticket=200, symbol="XAUUSD", type=mock.ORDER_TYPE_SELL, volume=0.01, magic=20250605)
+        mock.positions_get.return_value = [pos1, pos2]
+
+        success = MagicMock()
+        success.retcode = mock.TRADE_RETCODE_DONE
+        failure = MagicMock()
+        failure.retcode = 10014
+        failure.comment = "no money"
+        mock.order_send.side_effect = [success, failure]
+        install_mock(mock)
+
+        engine = MT5Engine(make_config())
+        closed = engine.close_all_positions()
+        self.assertEqual(closed, [100])
+
+
+class TestResetMartingaleState(unittest.TestCase):
+    """reset_martingale_state() writes level=0 and lot=base_lot to the state file."""
+
+    def test_resets_to_base_values(self):
+        work_dir = tempfile.mkdtemp()
+        state_path = os.path.join(work_dir, "state.json")
+
+        with open(state_path, "w") as f:
+            json.dump({"level": 3, "lot": 0.08}, f)
+
+        install_mock(make_mock_mt5())
+        engine = MT5Engine(make_config(state_file=state_path))
+        engine.reset_martingale_state()
+
+        with open(state_path) as f:
+            state = json.load(f)
+        self.assertEqual(state["level"], 0)
+        self.assertAlmostEqual(state["lot"], 0.01)
+
+        import shutil
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+class TestConfigPnlFieldsRoundtrip(unittest.TestCase):
+    """TraderConfig save/load preserves pnl_target and pnl_check_interval_seconds."""
+
+    def test_pnl_fields_roundtrip(self):
+        work_dir = tempfile.mkdtemp()
+        cfg_path = os.path.join(work_dir, "config.json")
+
+        config = TraderConfig(
+            mt5_path="C:\\MT5\\terminal64.exe",
+            pnl_target=500.0,
+            pnl_check_interval_seconds=30,
+        )
+        config.save(cfg_path)
+
+        loaded = TraderConfig.load(cfg_path)
+        self.assertEqual(loaded.pnl_target, 500.0)
+        self.assertEqual(loaded.pnl_check_interval_seconds, 30)
+
+        import shutil
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
 class TestAdvanceMartingale(unittest.TestCase):
     """
     Acceptance Criteria 4 & 5:

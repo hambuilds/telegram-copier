@@ -36,6 +36,8 @@ class TraderConfig:
     mt5_connect_retry_delay: int = 10
     state_file: str = "state.json"
     config_file: str = "config.json"
+    pnl_target: float = 0.0
+    pnl_check_interval_seconds: int = 10
 
     def save(self, path: str | None = None) -> None:
         target = Path(path) if path else Path.cwd() / self.config_file

@@ -357,6 +357,93 @@ class MT5Engine:
         log.info("Both positions opened successfully (tickets %s, %s).", ticket_a, ticket_b)
         return True
 
+    # ── Account info ──────────────────────────────────────────────────────────
+
+    def get_account_info(self) -> dict | None:
+        """
+        Return a snapshot of the MT5 account info dict.
+
+        Returns
+        -------
+        dict | None
+            Dict with ``balance``, ``equity``, ``margin``, ``margin_free``,
+            ``profit`` keys, or ``None`` if MT5 is not connected or the call
+            fails.
+        """
+        mt5 = _lazy_mt5()
+        info = mt5.account_info()
+        if info is None:
+            return None
+        return {
+            "balance": info.balance,
+            "equity": info.equity,
+            "margin": info.margin,
+            "margin_free": info.margin_free,
+            "profit": info.profit,
+        }
+
+    # ── PnL helpers ───────────────────────────────────────────────────────────
+
+    def get_total_floating_pnl(self, magic: int | None = None) -> float:
+        """
+        Sum the floating profit of all open positions.
+
+        Parameters
+        ----------
+        magic: int | None
+            If provided, only sum positions whose ``magic`` equals this value.
+
+        Returns
+        -------
+        float
+            Total floating PnL.  Returns ``0.0`` when no positions exist or
+            MT5 is not connected.
+        """
+        mt5 = _lazy_mt5()
+        positions = mt5.positions_get()
+        if not positions:
+            return 0.0
+        total = 0.0
+        for pos in positions:
+            if magic is None or pos.magic == magic:
+                total += pos.profit
+        return total
+
+    def close_all_positions(self, magic: int | None = None) -> list[int]:
+        """
+        Close every open position (optionally filtered by ``magic``).
+
+        Uses the same close logic as :meth:`close_position`.
+
+        Parameters
+        ----------
+        magic: int | None
+            If provided, only close positions with this magic number.
+
+        Returns
+        -------
+        list[int]
+            Ticket numbers of successfully closed positions.
+        """
+        mt5 = _lazy_mt5()
+        positions = mt5.positions_get()
+        if not positions:
+            return []
+        closed: list[int] = []
+        for pos in positions:
+            if magic is not None and pos.magic != magic:
+                continue
+            if self.close_position(pos.ticket):
+                closed.append(pos.ticket)
+        return closed
+
+    def reset_martingale_state(self) -> None:
+        """
+        Reset the martingale state to level=0 and base_lot, then persist it.
+        """
+        state = MartingaleState(level=0, lot=self.config.base_lot)
+        self._save_state(state)
+
     # ── Martingale advance ────────────────────────────────────────────────────
 
     def advance_martingale(self, win: bool) -> None:

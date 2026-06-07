@@ -12,6 +12,7 @@ import logging
 import os
 import queue
 import sys
+import time
 
 import tkinter as tk
 from tkinter import ttk
@@ -65,6 +66,8 @@ class SetupWizard(tk.Toplevel):
         self._sl_pips_var = tk.StringVar(value="50")
         self._tp1_pips_var = tk.StringVar(value="25")
         self._tp2_pips_var = tk.StringVar(value="50")
+        self._pnl_target_var = tk.StringVar(value="0")
+        self._pnl_check_interval_var = tk.StringVar(value="10")
 
         # Build UI
         container = ttk.Frame(self, padding=16)
@@ -150,6 +153,20 @@ class SetupWizard(tk.Toplevel):
         ttk.Separator(container).grid(row=row, column=0, columnspan=2, sticky="ew", pady=8)
         row += 1
 
+        # ── PnL Auto-Close ──────────────────────────────────────────────────
+        ttk.Label(container, text="PnL Auto-Close", font=("Segoe UI", 10, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+        row += 1
+
+        _add_field(container, row, "PnL Target ($):", self._pnl_target_var)
+        row += 1
+        _add_field(container, row, "PnL Check Interval (sec):", self._pnl_check_interval_var)
+        row += 1
+
+        ttk.Separator(container).grid(row=row, column=0, columnspan=2, sticky="ew", pady=8)
+        row += 1
+
         # ── Telegram Bot ────────────────────────────────────────────────────
         ttk.Label(container, text="Telegram Bot", font=("Segoe UI", 10, "bold")).grid(
             row=row, column=0, columnspan=2, sticky="w", pady=(0, 8)
@@ -201,6 +218,8 @@ class SetupWizard(tk.Toplevel):
             sl_pips = int(self._sl_pips_var.get())
             tp1_pips = int(self._tp1_pips_var.get())
             tp2_pips = int(self._tp2_pips_var.get())
+            pnl_target = float(self._pnl_target_var.get())
+            pnl_check_interval = int(self._pnl_check_interval_var.get())
 
             config = TraderConfig(
                 mt5_path=mt5_path,
@@ -219,6 +238,8 @@ class SetupWizard(tk.Toplevel):
                 sl_pips=sl_pips,
                 tp1_pips=tp1_pips,
                 tp2_pips=tp2_pips,
+                pnl_target=pnl_target,
+                pnl_check_interval_seconds=pnl_check_interval,
             )
             config.validate()
             config.save()
@@ -240,6 +261,8 @@ class SetupWizard(tk.Toplevel):
                 "sl_pips": sl_pips,
                 "tp1_pips": tp1_pips,
                 "tp2_pips": tp2_pips,
+                "pnl_target": pnl_target,
+                "pnl_check_interval_seconds": pnl_check_interval,
                 "pip_value": 0.10,
                 "mt5_connect_retries": 5,
                 "mt5_connect_retry_delay": 10,
@@ -289,6 +312,8 @@ class _DashboardTab(ttk.Frame):
         self._level_var = tk.StringVar(value="0")
         self._lot_var = tk.StringVar(value="0.01")
         self._latest_signal_var = tk.StringVar(value="No signal received")
+        self._pnl_var = tk.StringVar(value="$0.00")
+        self._pnl_target_var = tk.StringVar(value="Disabled")
 
         content = ttk.Frame(self, padding=16)
         content.pack(fill="both", expand=True)
@@ -338,12 +363,35 @@ class _DashboardTab(ttk.Frame):
 
         ttk.Separator(content).grid(row=11, column=0, columnspan=2, sticky="ew", pady=8)
 
-        # ── Latest Signal ───────────────────────────────────────────────────
-        ttk.Label(content, text="Latest Signal", font=("Segoe UI", 10, "bold")).grid(
+        # ── PnL Monitor ─────────────────────────────────────────────────────
+        ttk.Label(content, text="PnL Monitor", font=("Segoe UI", 10, "bold")).grid(
             row=12, column=0, columnspan=2, sticky="w", pady=(0, 8)
         )
+        ttk.Label(content, text="Current PnL:").grid(row=13, column=0, sticky="w", pady=4)
+        ttk.Label(content, textvariable=self._pnl_var).grid(
+            row=13, column=1, sticky="w", pady=4
+        )
+        ttk.Label(content, text="PnL Target:").grid(row=14, column=0, sticky="w", pady=4)
+        ttk.Label(content, textvariable=self._pnl_target_var).grid(
+            row=14, column=1, sticky="w", pady=4
+        )
+
+        ttk.Separator(content).grid(row=15, column=0, columnspan=2, sticky="ew", pady=8)
+
+        # ── Close All Button ────────────────────────────────────────────────
+        self._close_all_btn = ttk.Button(
+            content, text="Close All Positions", command=self._on_close_all
+        )
+        self._close_all_btn.grid(row=16, column=0, columnspan=2, pady=8)
+
+        ttk.Separator(content).grid(row=17, column=0, columnspan=2, sticky="ew", pady=8)
+
+        # ── Latest Signal ───────────────────────────────────────────────────
+        ttk.Label(content, text="Latest Signal", font=("Segoe UI", 10, "bold")).grid(
+            row=18, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
         ttk.Label(content, textvariable=self._latest_signal_var).grid(
-            row=13, column=0, columnspan=2, sticky="w", pady=4
+            row=19, column=0, columnspan=2, sticky="w", pady=4
         )
 
     def _on_mt5_connect(self) -> None:
@@ -385,6 +433,25 @@ class _DashboardTab(ttk.Frame):
             self._bot_ref["bot"] = None
             self._bot_status_var.set("Stopped")
             self._bot_btn.config(text="Start Bot")
+
+    def _on_close_all(self) -> None:
+        """Close all positions and reset martingale state."""
+        if not self._engine.is_connected():
+            messagebox.showwarning("Not Connected", "MT5 is not connected.")
+            return
+        if messagebox.askyesno("Confirm", "Close ALL open positions and reset martingale?"):
+            closed = self._engine.close_all_positions(magic=self._engine.config.magic_number)
+            self._engine.reset_martingale_state()
+            self._log.info("Closed %d positions manually.", len(closed))
+            messagebox.showinfo("Done", f"Closed {len(closed)} positions. Martingale reset.")
+
+    def update_pnl_display(self) -> None:
+        """Update PnL and target labels from engine state."""
+        if self._engine.is_connected():
+            pnl = self._engine.get_total_floating_pnl(magic=self._engine.config.magic_number)
+            self._pnl_var.set(f"${pnl:,.2f}")
+        target = self._engine.config.pnl_target
+        self._pnl_target_var.set(f"${target:,.2f}" if target > 0 else "Disabled")
 
     def update_latest_signal(self, signal: Signal) -> None:
         """Update the label showing the latest received signal."""
@@ -544,6 +611,7 @@ class TraderApp(tk.Tk):
         self._bot_ref: dict = {"bot": None, "queue": self._signal_queue}
         self._polling_active = True
         self._latest_signal: Signal | None = None
+        self._last_pnl_check = 0.0
 
         # Notebook tabs
         notebook = ttk.Notebook(self)
@@ -597,6 +665,24 @@ class TraderApp(tk.Tk):
             self._dashboard.update_latest_signal(signal)
         except queue.Empty:
             pass
+
+        # PnL target check (every N seconds)
+        interval = self._engine.config.pnl_check_interval_seconds
+        if self._engine.config.pnl_target > 0 and interval > 0:
+            now = time.time()
+            if now - self._last_pnl_check >= interval:
+                self._last_pnl_check = now
+                pnl = self._engine.get_total_floating_pnl(magic=self._engine.config.magic_number)
+                self._dashboard.update_pnl_display()
+                if pnl >= self._engine.config.pnl_target:
+                    _log.info("PnL target reached: %.2f / %.2f", pnl, self._engine.config.pnl_target)
+                    closed = self._engine.close_all_positions(magic=self._engine.config.magic_number)
+                    self._engine.reset_martingale_state()
+                    _log.info("Auto-closed %d positions.", len(closed))
+                    messagebox.showinfo(
+                        "PnL Target Reached",
+                        f"PnL reached ${pnl:,.2f}. Closed {len(closed)} positions. Martingale reset."
+                    )
 
         if self._polling_active:
             self.after(1000, self._poll_queue)
