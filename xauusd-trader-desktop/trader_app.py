@@ -165,6 +165,12 @@ class SetupWizard(tk.Toplevel):
         ttk.Button(btn_frame, text="Save", command=self._on_save).pack(side="left", padx=8)
         ttk.Button(btn_frame, text="Cancel", command=self._on_cancel).pack(side="left", padx=8)
 
+    def run(self) -> None:
+        """Lift, focus, and block until the wizard is closed."""
+        self.update_idletasks()
+        self.lift()
+        self.focus_force()
+        self.grab_set()
         self.wait_window()
 
     def _update_b_ratio(self) -> None:
@@ -524,6 +530,7 @@ class TraderApp(tk.Tk):
             self.withdraw()
             self.update_idletasks()
             wizard = SetupWizard(self)
+            wizard.run()
             result = wizard.get_result()
             if result is None:
                 self.destroy()
