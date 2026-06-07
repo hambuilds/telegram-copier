@@ -166,11 +166,12 @@ class SetupWizard(tk.Toplevel):
         ttk.Button(btn_frame, text="Cancel", command=self._on_cancel).pack(side="left", padx=8)
 
     def run(self) -> None:
-        """Lift, focus, and block until the wizard is closed."""
-        self.update_idletasks()
+        """Show, lift, focus, and block until the wizard is closed."""
+        self.transient(self.master)
+        self.grab_set()
+        self.attributes("-topmost", True)
         self.lift()
         self.focus_force()
-        self.grab_set()
         self.wait_window()
 
     def _update_b_ratio(self) -> None:
@@ -524,11 +525,9 @@ class TraderApp(tk.Tk):
         # Load config; show setup wizard if path is missing
         self.trader_config = TraderConfig.load()
         if not self.trader_config.mt5_path:
-            # Hide the main window so the modal wizard is the only visible window.
-            # This also ensures the window manager registers the parent before the
-            # transient dialog is created, preventing the wizard from failing to map.
-            self.withdraw()
-            self.update_idletasks()
+            # Show wizard as a topmost modal dialog while the main window stays
+            # behind it.  Do NOT withdraw() the main window on Windows; it
+            # can prevent the transient child from mapping at all.
             wizard = SetupWizard(self)
             wizard.run()
             result = wizard.get_result()
@@ -537,7 +536,6 @@ class TraderApp(tk.Tk):
                 return
             # Reload config from wizard result
             self.trader_config = TraderConfig(**result)
-            self.deiconify()
 
         # Core components
         self._engine = MT5Engine(self.trader_config)
