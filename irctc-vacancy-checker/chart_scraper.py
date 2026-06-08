@@ -141,36 +141,88 @@ class ChartScraper:
             await asyncio.sleep(0.3)
 
             # 3. Extract stations from boarding dropdown if not provided
+            boarding_input, _ = await self._find_input_by_keywords(
+                page, ["Boarding", "boarding station"]
+            )
+            print("[scraper] Found boarding station input")
+
             if stations is None:
-                boarding_select = page.locator("mat-select[formcontrolname='boardingStation']")
-                await boarding_select.click()
-                await page.wait_for_selector("mat-option", timeout=DEFAULT_TIMEOUT)
-                opts = await page.locator("mat-option").all()
+                try:
+                    await boarding_input.click(force=True)
+                except TimeoutError:
+                    pass
+                await asyncio.sleep(0.5)
+
+                # Extract stations from dropdown options (React Select, native select, or Angular)
+                opt_texts: list[str] = []
+                for option_selector in [
+                    ".react-select__option",
+                    "[role='option']",
+                    "mat-option",
+                    ".MuiMenuItem-root",
+                    "select option",
+                ]:
+                    try:
+                        loc = page.locator(option_selector)
+                        count = await loc.count()
+                        if count > 0:
+                            texts = await loc.all_inner_texts()
+                            if texts:
+                                opt_texts = texts
+                                print(f"[scraper] Found {len(opt_texts)} stations via {option_selector}")
+                                break
+                    except Exception:
+                        continue
+
                 stations = []
-                for opt in opts:
-                    text = await opt.inner_text()
-                    code = text.strip().split()[0]  # e.g. "CLT - KOZHIKODE"
-                    name = text.strip()
+                for txt in opt_texts:
+                    code = txt.strip().split()[0]  # e.g. "CLT - KOZHIKODE"
+                    name = txt.strip()
                     stations.append(Station(code, name))
+
+                # Close dropdown if still open
                 await page.keyboard.press("Escape")
             else:
-                boarding_select = page.locator("mat-select[formcontrolname='boardingStation']")
-                await boarding_select.click()
-                await page.wait_for_selector("mat-option", timeout=DEFAULT_TIMEOUT)
+                try:
+                    await boarding_input.click(force=True)
+                except TimeoutError:
+                    pass
+                await asyncio.sleep(0.5)
 
             # 4. Select boarding station
-            option_texts = await page.locator("mat-option").all_inner_texts()
-            target_opt = None
-            for idx, txt in enumerate(option_texts):
+            if opt_texts := [s.name for s in stations]:
+                print(f"[scraper] Available stations: {opt_texts[:5]}...")
+            for txt in [s.name for s in stations]:
                 if boarding_station.upper() in txt.upper():
-                    target_opt = page.locator("mat-option").nth(idx)
+                    # Type to filter React Select
+                    await boarding_input.fill(" ")
+                    await asyncio.sleep(0.2)
+                    await boarding_input.fill(boarding_station)
+                    # Use keyboard to select
+                    await page.keyboard.press("ArrowDown")
+                    await page.keyboard.press("Enter")
+                    print(f"[scraper] Selected boarding station: {txt}")
                     break
-            if target_opt is None:
+            else:
                 raise ValueError(f"Boarding station {boarding_station} not found in dropdown")
-            await target_opt.click()
 
             # 5. Click Get Train Chart
-            await page.locator("button:has-text('Get Train Chart')").click()
+            for btn_selector in [
+                "button:has-text('Get Train Chart')",
+                "button:has-text('Get Chart')",
+                "button[type='submit']",
+                ".btn:has-text('Get')",
+            ]:
+                try:
+                    btn = page.locator(btn_selector).first
+                    await btn.wait_for(state="visible", timeout=3_000)
+                    await btn.click(force=True)
+                    print(f"[scraper] Clicked button via {btn_selector}")
+                    break
+                except TimeoutError:
+                    continue
+            else:
+                raise RuntimeError("Unable to find 'Get Train Chart' button")
 
             # 6. Wait for chart table to appear
             await page.wait_for_selector("table", timeout=DEFAULT_TIMEOUT)
