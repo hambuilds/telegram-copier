@@ -1,0 +1,17 @@
+{
+  "id": "019ea39d-14f2-7459-ba0b-e3761aae9b10",
+  "name": "IRCTC vacancy checker",
+  "description": "Create a web automation tool for checking train seat availability on https://www.irctc.co.in/online-charts/\n\nRequirements:\n1. Input: train number, boarding station code (e.g., CLT for Kozhikode), destination station code, coach/class type (Sleeper, 3AC, 3AC Economy, etc.)\n2. Check DIRECT ticket availability from boarding point to destination\n3. If no direct ticket, check SPLIT-JOURNEY options: find intermediate stations where two separate tickets could be booked (e.g., B→C and C→F to reach F from B)\n4. Account for multiple boarding points (A, B, C, D, E, F) along the train route\n5. The tool should be configurable for different train routes and station codes\n6. Output should clearly show available options (direct or split) with seat counts\n\nThe IRCTC online charts page is a dynamic web application that likely requires browser automation (Selenium/Playwright) to interact with.",
+  "status": "draft",
+  "worktree": {
+    "path": "/home/user1/ai-engineering-from-scratch/projects",
+    "branch": "main",
+    "commit": "429c0f068c0ab19a7f5a68fae9e62fff1c0eef7c"
+  },
+  "scoping": {},
+  "phases": [],
+  "decisions": [],
+  "memories": [],
+  "createdAt": "2026-06-07T19:44:01.266Z",
+  "updatedAt": "2026-06-07T19:44:01.266Z"
+}
