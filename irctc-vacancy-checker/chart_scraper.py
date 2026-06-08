@@ -101,7 +101,7 @@ class ChartScraper:
         """
         page = await self._new_page()
         try:
-            # 1. Fill train number (PrimeNG p-autocomplete — needs click, type, then pick)
+            # 1. Fill train number (React Select)
             try:
                 train_input, sel_name = await self._find_input_by_keywords(
                     page, ["Train Name", "Train", "Number"]
@@ -110,15 +110,20 @@ class ChartScraper:
             except TimeoutError:
                 await self._maybe_screenshot(page, "train_input_not_found")
                 raise RuntimeError("Unable to find train input on IRCTC page. Check debug_irctc_train_input_not_found.png")
-            await train_input.click()
-            await train_input.fill(train_number)
             try:
-                await page.wait_for_selector("mat-option", timeout=10_000)
-                await page.locator("mat-option").first.click()
+                await train_input.click(force=True)
             except TimeoutError:
-                print("[scraper] No autocomplete dropdown appeared; proceeding anyway")
+                pass
+            await train_input.fill(train_number)
+            await asyncio.sleep(0.5)
+            try:
+                await page.keyboard.press("ArrowDown")
+                await page.keyboard.press("Enter")
+                print(f"[scraper] Selected train via dropdown")
+            except Exception:
+                print("[scraper] No train dropdown appeared; proceeding anyway")
 
-            # 2. Fill journey date (PrimeNG p-calendar)
+            # 2. Fill journey date (React Select or standard input)
             try:
                 date_input, sel_name = await self._find_input_by_keywords(
                     page, ["Journey Date", "Date"]
@@ -127,10 +132,13 @@ class ChartScraper:
             except TimeoutError:
                 await self._maybe_screenshot(page, "date_input_not_found")
                 raise RuntimeError("Unable to find journey date input on IRCTC page. Check debug_irctc_date_input_not_found.png")
-            await date_input.click()
+            try:
+                await date_input.click(force=True)
+            except TimeoutError:
+                pass
             await date_input.fill(journey_date)
-            # Close date picker if it opened
             await page.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
 
             # 3. Extract stations from boarding dropdown if not provided
             if stations is None:
