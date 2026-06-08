@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--date", required=True, help="Journey date (YYYY-MM-DD)")
     parser.add_argument("--headless", action="store_true", default=True, help="Run browser headlessly")
     parser.add_argument("--no-headless", dest="headless", action="store_false", help="Show browser window")
+    parser.add_argument("--debug", action="store_true", default=False, help="Save screenshots and HTML on errors")
     return parser
 
 
@@ -28,7 +29,7 @@ async def run(args) -> JourneyPlan:
     origin = args.origin.upper()
     destination = args.destination.upper()
 
-    async with ChartScraper(headless=args.headless) as scraper:
+    async with ChartScraper(headless=args.headless, debug=args.debug) as scraper:
         # 1. Fetch base chart for origin boarding station
         base_chart = await scraper.fetch_chart(
             train_number=args.train,

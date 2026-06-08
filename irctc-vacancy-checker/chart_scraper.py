@@ -9,10 +9,48 @@ from config import IRCTC_CHARTS_URL, DEFAULT_TIMEOUT
 
 
 class ChartScraper:
-    def __init__(self, headless: bool = True):
+    def __init__(self, headless: bool = True, debug: bool = False):
         self.headless = headless
+        self.debug = debug
         self._playwright = None
         self._browser = None
+
+    async def _find_input_by_keywords(self, page: Page, keywords: list[str], timeout: int = 2_000) -> tuple:
+        """Try several strategies to locate a text input.
+
+        Returns (locator, selector_name) so the caller knows which one matched.
+        Raises TimeoutError if none match.
+        """
+        strategies = []
+        for kw in keywords:
+            strategies.append((f"input[placeholder*='{kw}']", f"placeholder*='{kw}'"))
+            strategies.append((f"input[placeholder*='{kw}' i]", f"placeholder*='{kw}' (case-insensitive)"))
+            strategies.append((f"input[aria-label*='{kw}' i]", f"aria-label*='{kw}'"))
+            strategies.append((f"mat-form-field:has-text('{kw}') input", f"mat-form-field text='{kw}'"))
+            strategies.append((f"label:has-text('{kw}') + input, label:has-text('{kw}') ~ input", f"adjacent-to-label '{kw}'"))
+        strategies.append(("input[type='text']", "first-text-input"))
+        strategies.append(("input.p-inputtext", "primeNG-input"))
+        strategies.append(("input:not([type='hidden']):visible", "any-visible-input"))
+
+        for selector, name in strategies:
+            loc = page.locator(selector).first
+            try:
+                await loc.wait_for(state="visible", timeout=timeout)
+                return loc, name
+            except TimeoutError:
+                continue
+        raise TimeoutError(f"Could not locate input matching keywords {keywords}")
+
+    async def _maybe_screenshot(self, page: Page, label: str) -> None:
+        if not self.debug:
+            return
+        prefix = f"debug_irctc_{label}"
+        await page.screenshot(path=f"{prefix}.png")
+        html = await page.content()
+        with open(f"{prefix}.html", "w", encoding="utf-8") as f:
+            f.write(html)
+        print(f"[debug] Saved {prefix}.png and {prefix}.html")
+
 
     async def __aenter__(self):
         self._playwright = await async_playwright().start()
@@ -64,14 +102,31 @@ class ChartScraper:
         page = await self._new_page()
         try:
             # 1. Fill train number (PrimeNG p-autocomplete — needs click, type, then pick)
-            train_input = page.locator("input[placeholder*='Train Name']")
+            try:
+                train_input, sel_name = await self._find_input_by_keywords(
+                    page, ["Train Name", "Train", "Number"]
+                )
+                print(f"[scraper] Found train input via strategy: {sel_name}")
+            except TimeoutError:
+                await self._maybe_screenshot(page, "train_input_not_found")
+                raise RuntimeError("Unable to find train input on IRCTC page. Check debug_irctc_train_input_not_found.png")
             await train_input.click()
             await train_input.fill(train_number)
-            await page.wait_for_selector("mat-option", timeout=DEFAULT_TIMEOUT)
-            await page.locator("mat-option").first.click()
+            try:
+                await page.wait_for_selector("mat-option", timeout=10_000)
+                await page.locator("mat-option").first.click()
+            except TimeoutError:
+                print("[scraper] No autocomplete dropdown appeared; proceeding anyway")
 
             # 2. Fill journey date (PrimeNG p-calendar)
-            date_input = page.locator("input[placeholder*='Journey Date']")
+            try:
+                date_input, sel_name = await self._find_input_by_keywords(
+                    page, ["Journey Date", "Date"]
+                )
+                print(f"[scraper] Found date input via strategy: {sel_name}")
+            except TimeoutError:
+                await self._maybe_screenshot(page, "date_input_not_found")
+                raise RuntimeError("Unable to find journey date input on IRCTC page. Check debug_irctc_date_input_not_found.png")
             await date_input.click()
             await date_input.fill(journey_date)
             # Close date picker if it opened
