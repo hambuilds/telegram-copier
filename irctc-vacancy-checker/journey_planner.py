@@ -35,6 +35,7 @@ class JourneyPlan:
     class_type: str
     direct: DirectResult
     split_options: List[SplitOption] = field(default_factory=list)
+    stations: List[Station] = field(default_factory=list)
 
 
 def find_station_index(stations: List[Station], code: str) -> int:
