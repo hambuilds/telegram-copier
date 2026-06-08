@@ -122,6 +122,7 @@ class ChartScraper:
                 print(f"[scraper] Selected train via dropdown")
             except Exception:
                 print("[scraper] No train dropdown appeared; proceeding anyway")
+            await asyncio.sleep(2.5)
 
             # 2. Fill journey date (React Select or standard input)
             try:
@@ -140,23 +141,24 @@ class ChartScraper:
             await page.keyboard.press("Escape")
             await asyncio.sleep(0.3)
 
-            # 3. Extract stations from boarding dropdown if not provided
+            # 3. Open boarding station dropdown
             boarding_input, _ = await self._find_input_by_keywords(
                 page, ["Boarding", "boarding station"]
             )
             print("[scraper] Found boarding station input")
+            try:
+                await boarding_input.click(force=True)
+            except TimeoutError:
+                pass
+            await asyncio.sleep(1.5)
 
+            # 4. Extract stations from dropdown options if not provided
+            opt_texts: list[str] = []
             if stations is None:
-                try:
-                    await boarding_input.click(force=True)
-                except TimeoutError:
-                    pass
-                await asyncio.sleep(0.5)
-
-                # Extract stations from dropdown options (React Select, native select, or Angular)
-                opt_texts: list[str] = []
+                # Try multiple option selectors to read available stations
                 for option_selector in [
                     ".react-select__option",
+                    ".react-select__menu [role='option']",
                     "[role='option']",
                     "mat-option",
                     ".MuiMenuItem-root",
@@ -173,38 +175,57 @@ class ChartScraper:
                                 break
                     except Exception:
                         continue
+                else:
+                    print("[scraper] WARNING: Could not extract station list from dropdown")
+                    await self._maybe_screenshot(page, "boarding_options_not_found")
 
                 stations = []
                 for txt in opt_texts:
-                    code = txt.strip().split()[0]  # e.g. "CLT - KOZHIKODE"
+                    parts = txt.strip().split(None, 1)
+                    code = parts[0] if parts else txt.strip()
                     name = txt.strip()
                     stations.append(Station(code, name))
 
-                # Close dropdown if still open
+                # Close dropdown
                 await page.keyboard.press("Escape")
-            else:
-                try:
-                    await boarding_input.click(force=True)
-                except TimeoutError:
-                    pass
                 await asyncio.sleep(0.5)
 
-            # 4. Select boarding station
-            if opt_texts := [s.name for s in stations]:
-                print(f"[scraper] Available stations: {opt_texts[:5]}...")
-            for txt in [s.name for s in stations]:
-                if boarding_station.upper() in txt.upper():
-                    # Type to filter React Select
-                    await boarding_input.fill(" ")
-                    await asyncio.sleep(0.2)
+            # 5. Select boarding station
+            if stations:
+                print(f"[scraper] Route stations: {[s.code for s in stations[:10]]}...")
+                match_found = False
+                for s in stations:
+                    if boarding_station.upper() in s.code.upper() or boarding_station.upper() in s.name.upper():
+                        print(f"[scraper] Matched station: {s}")
+                        match_found = True
+                        break
+
+                if match_found:
+                    # Clear and type to filter React Select
+                    await boarding_input.fill("")
+                    await asyncio.sleep(0.3)
                     await boarding_input.fill(boarding_station)
-                    # Use keyboard to select
+                    await asyncio.sleep(0.5)
                     await page.keyboard.press("ArrowDown")
                     await page.keyboard.press("Enter")
-                    print(f"[scraper] Selected boarding station: {txt}")
-                    break
+                    print(f"[scraper] Selected boarding station: {boarding_station}")
+                else:
+                    print(f"[scraper] WARNING: {boarding_station} not in extracted list, trying blind keyboard select")
+                    await boarding_input.fill("")
+                    await asyncio.sleep(0.3)
+                    await boarding_input.fill(boarding_station)
+                    await asyncio.sleep(0.5)
+                    await page.keyboard.press("ArrowDown")
+                    await page.keyboard.press("Enter")
             else:
-                raise ValueError(f"Boarding station {boarding_station} not found in dropdown")
+                # No stations extracted — try blind keyboard selection
+                print("[scraper] No station list available; attempting blind keyboard selection")
+                await boarding_input.fill("")
+                await asyncio.sleep(0.3)
+                await boarding_input.fill(boarding_station)
+                await asyncio.sleep(0.5)
+                await page.keyboard.press("ArrowDown")
+                await page.keyboard.press("Enter")
 
             # 5. Click Get Train Chart
             for btn_selector in [
