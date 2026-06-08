@@ -41,6 +41,20 @@ class ChartScraper:
                 continue
         raise TimeoutError(f"Could not locate input matching keywords {keywords}")
 
+    async def _list_visible_inputs(self, page: Page) -> list:
+        """Return a list of (locator, details) for every visible text/combobox input."""
+        all_loc = page.locator("input[type='text']:visible, input[role='combobox']:visible, input[aria-autocomplete='list']:visible")
+        count = await all_loc.count()
+        result = []
+        for i in range(count):
+            loc = all_loc.nth(i)
+            try:
+                attrs = await loc.evaluate("(el) => ({id: el.id, placeholder: el.placeholder, aria: el.getAttribute('aria-label'), type: el.type})")
+                result.append((loc, attrs))
+            except Exception:
+                result.append((loc, {}))
+        return result
+
     async def _maybe_screenshot(self, page: Page, label: str) -> None:
         if not self.debug:
             return
@@ -142,10 +156,26 @@ class ChartScraper:
             await asyncio.sleep(0.3)
 
             # 3. Open boarding station dropdown
-            boarding_input, _ = await self._find_input_by_keywords(
-                page, ["Boarding", "boarding station"]
-            )
-            print("[scraper] Found boarding station input")
+            # List all visible inputs so we pick the right one by index
+            all_inputs = await self._list_visible_inputs(page)
+            print(f"[scraper] {len(all_inputs)} visible text/combobox inputs on page:")
+            for i, (_, attrs) in enumerate(all_inputs):
+                print(f"  [{i}] id={attrs.get('id')} placeholder={attrs.get('placeholder')} aria={attrs.get('aria')} type={attrs.get('type')}")
+
+            # Try to pick boarding as the 3rd input (index 2), or 2nd input (index 1) if only 2 exist
+            boarding_input = None
+            for idx in [2, 1]:
+                if idx < len(all_inputs):
+                    try:
+                        await all_inputs[idx][0].wait_for(state="visible", timeout=1_000)
+                        boarding_input = all_inputs[idx][0]
+                        print(f"[scraper] Using input[{idx}] for boarding station")
+                        break
+                    except TimeoutError:
+                        continue
+            if boarding_input is None:
+                await self._maybe_screenshot(page, "boarding_input_not_found")
+                raise RuntimeError("Unable to find boarding station input on IRCTC page")
             try:
                 await boarding_input.click(force=True)
             except TimeoutError:
