@@ -2,7 +2,7 @@
 
 import asyncio
 from typing import List, Optional
-from playwright.async_api import async_playwright, Page
+from playwright.async_api import async_playwright, Page, TimeoutError
 
 from models import Station, CoachVacancy, ChartResult
 from config import IRCTC_CHARTS_URL, DEFAULT_TIMEOUT
@@ -44,7 +44,7 @@ class ChartScraper:
         # (common on IRCTC), just proceed — by then the UI is rendered.
         try:
             await page.wait_for_load_state("networkidle", timeout=15_000)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         return page
 
@@ -63,14 +63,16 @@ class ChartScraper:
         """
         page = await self._new_page()
         try:
-            # 1. Fill train number (typeahead)
+            # 1. Fill train number (PrimeNG p-autocomplete — needs click, type, then pick)
             train_input = page.locator("input[placeholder*='Train Name']")
+            await train_input.click()
             await train_input.fill(train_number)
             await page.wait_for_selector("mat-option", timeout=DEFAULT_TIMEOUT)
             await page.locator("mat-option").first.click()
 
-            # 2. Fill journey date
+            # 2. Fill journey date (PrimeNG p-calendar)
             date_input = page.locator("input[placeholder*='Journey Date']")
+            await date_input.click()
             await date_input.fill(journey_date)
             # Close date picker if it opened
             await page.keyboard.press("Escape")
