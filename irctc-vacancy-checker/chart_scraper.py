@@ -16,7 +16,10 @@ class ChartScraper:
 
     async def __aenter__(self):
         self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(headless=self.headless)
+        self._browser = await self._playwright.chromium.launch(
+            headless=self.headless,
+            args=["--disable-http2"]
+        )
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -27,6 +30,14 @@ class ChartScraper:
 
     async def _new_page(self) -> Page:
         page = await self._browser.new_page()
+        await page.set_extra_http_headers({
+            "sec-ch-ua": '"Not.A/Brand";v="99", "Chromium";v="136"',
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/136.0.0.0 Safari/537.36"
+            ),
+        })
         await page.goto(IRCTC_CHARTS_URL, wait_until="networkidle")
         return page
 
