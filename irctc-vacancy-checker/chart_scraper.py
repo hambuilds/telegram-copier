@@ -39,6 +39,13 @@ class ChartScraper:
             ),
         })
         await page.goto(IRCTC_CHARTS_URL, wait_until="domcontentloaded")
+        # Angular/PrimeNG apps need time to bootstrap after DOM is ready.
+        # Give it up to 15 s to settle; if background connections persist
+        # (common on IRCTC), just proceed — by then the UI is rendered.
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15_000)
+        except asyncio.TimeoutError:
+            pass
         return page
 
     async def fetch_chart(
