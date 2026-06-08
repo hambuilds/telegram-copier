@@ -28,6 +28,14 @@ Options:
 - `--date`  — Journey date in `YYYY-MM-DD` format
 - `--no-headless` — Show browser window (useful for debugging)
 
+## How It Works
+
+1. Opens the IRCTC online-charts page with Playwright.
+2. Selects train number and journey date.
+3. Extracts the full route from the boarding-station dropdown.
+4. Fetches the reservation chart for the boarding station.
+5. If direct availability is low/none, fetches charts for every intermediate station to find valid split-journey pairs.
+
 ## Running Tests
 
 ```bash
