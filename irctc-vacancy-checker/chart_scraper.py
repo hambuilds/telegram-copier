@@ -38,7 +38,7 @@ class ChartScraper:
                 "Chrome/136.0.0.0 Safari/537.36"
             ),
         })
-        await page.goto(IRCTC_CHARTS_URL, wait_until="networkidle")
+        await page.goto(IRCTC_CHARTS_URL, wait_until="domcontentloaded")
         return page
 
     async def fetch_chart(
